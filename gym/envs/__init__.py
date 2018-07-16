@@ -531,3 +531,19 @@ register(
     reward_threshold=20,
     )
 
+# Synthesis
+# -----------------------------------
+
+register(
+    id='FourBarPath-v0',
+    entry_point='gym.envs.synthesis:FourBarPathEnv1',
+    max_episode_steps=200,
+    reward_threshold=195.0,
+)
+
+register(
+    id='CouplerMotion-v0',
+    entry_point='gym.envs.synthesis:CouplerMotionSynthesis',
+    max_episode_steps=200,
+    reward_threshold=195.0,
+)
