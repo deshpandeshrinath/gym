@@ -50,6 +50,7 @@ class CouplerMotionSynthesis(gym.Env):
         self.line1 = self.ax1.plot(np.arange(1), np.arange(1), 'r-', label='Coupler')[0]
         self.line2 = self.ax1.plot(np.arange(1), np.arange(1), 'b-', label='Moving Point')[0]
         self.line3 = self.ax1.plot(np.arange(1), np.arange(1), 'k-', )[0]
+        self.line4 = self.ax1.plot(np.arange(1), np.arange(1), 'g-', )[0]
         self.ax1.axis('equal')
 
         self.dr = 0.1 # 5 percent change at each action
@@ -76,6 +77,8 @@ class CouplerMotionSynthesis(gym.Env):
         y_coupler = op['y']
         theta_coupler = op['normalized_angle']
 
+        self.cx1 = 0
+        self.cy1 = 0
         r_x = 0
         r_y = 0
         state = self._calculate_state(r_x, r_y, x_coupler, y_coupler, theta_coupler)
@@ -114,8 +117,6 @@ class CouplerMotionSynthesis(gym.Env):
 
         reward, is_sucess = self._evaluate_step()
 
-        #if self.steps > 100000:
-        #    done = True
         '''
         TODO: goal state should be of fixed dimensions, which currently is not.
         for goal based RL algorithms use commented
@@ -155,9 +156,22 @@ class CouplerMotionSynthesis(gym.Env):
         y = self.state[400:500]
         data = getFittingError(x, y)
         # scaling fitting error to reward signal
-        reward = -data['e']*1000
+        reward = -data['e']*10
+        if reward < -40:
+            reward = -40 + (reward/40)
 
-        if reward > -0.001:
+        ''' Penalizing movements
+        '''
+        reward -= 0.02
+
+        try:
+            self.r1 = data['r']
+            self.cx1 = data['c_x']
+            self.cy1 = data['c_y']
+        except:
+            pass
+
+        if reward >= -0.5:
             success = True
         else:
             success = False
@@ -176,6 +190,10 @@ class CouplerMotionSynthesis(gym.Env):
         self.line1.set_data(x_coupler, y_coupler)
         self.line2.set_data(x, y)
         self.line3.set_data([x_coupler[0], x[0]], [y_coupler[0], y[0]])
+        try:
+            self.line4.set_data([self.cx1, x[0]], [self.cy1, y[0]])
+        except:
+            pass
 
         self.ax1.legend(loc='best')
         self.fig.canvas.draw()
@@ -205,7 +223,8 @@ def getFittingError(x, y):
     denom = np.sqrt(mat[:,0]**2 + mat[:,1]**2 + mat[:, 2]**2 + mat[:, 3]**2)
     assert denom.shape == mat[:,0].shape
 
-    e = np.sum(np.square(e/denom))
+    e = np.sum(np.square(e*denom))
+    #e = np.sum(np.square(e))
 
     e = e/x.shape[0]
 
@@ -219,7 +238,7 @@ def getFittingError(x, y):
 
     data = dict()
 
-    if e <= 1e-10:
+    if e <= 1e-2:
         if r < 100:
             data['dyad_type'] = 'rr'
         if r >= 100 and (np.abs(c_x) > 1000 or np.abs(c_x) > 1000):

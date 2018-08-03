@@ -545,5 +545,5 @@ register(
     id='CouplerMotion-v0',
     entry_point='gym.envs.synthesis:CouplerMotionSynthesis',
     max_episode_steps=200,
-    reward_threshold=195.0,
+    reward_threshold= -0.05,
 )
