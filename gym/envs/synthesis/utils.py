@@ -7,6 +7,241 @@ import scipy.integrate as integrate
 import time
 from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
 import pickle
+from scipy.interpolate import UnivariateSpline
+from collections import deque
+
+def shuffle_in_unison(a, b):
+    rng_state = np.random.get_state()
+    np.random.shuffle(a)
+    np.random.set_state(rng_state)
+    np.random.shuffle(b)
+
+def triangulate_point(l1, l2, l3):
+    if l1*l2 > 1e-8:
+        theta = np.arccos((l3**2 - (l1**2 + l2**2))/(2*l1*l2))
+    else:
+        theta = 0
+    return theta
+
+def retrive_curves_from_features(fvs, n_points=50):
+    assert(len(fvs.shape) == 3)
+    n_samples, n_5, _ = fvs.shape
+
+    curves = np.zeros((n_samples, n_points, 2))
+
+    for ind, fv in enumerate(fvs):
+        f_mat = np.zeros((n_points,n_points))
+        k = 0
+        for i in range(n_points):
+            for j in range(n_points):
+                if i < j and i + 3 >= j:
+                    f_mat[i][j] = fv[k,0]
+                    k += 1
+
+        x = [0, f_mat[0][1]]
+        y = [0, 0]
+        theta0 = 0.0
+
+        for i in range(2, n_points):
+            theta = triangulate_point(f_mat[i-2][i-1], f_mat[i-1][i], f_mat[i-2][i])
+            if i != 2:
+                xx1 = x[i-1] + f_mat[i-1][i]*np.cos(theta0 - theta)
+                yy1 = y[i-1] + f_mat[i-1][i]*np.sin(theta0 - theta)
+
+                xx2 = x[i-1] + f_mat[i-1][i]*np.cos(theta + theta0)
+                yy2 = y[i-1] + f_mat[i-1][i]*np.sin(theta + theta0)
+
+                dist1 = np.abs(f_mat[i-3][i]-np.sqrt((xx1-x[i-3])**2 + (yy1-y[i-3])**2))
+                dist2 = np.abs(f_mat[i-3][i]-np.sqrt((xx2-x[i-3])**2 + (yy2-y[i-3])**2))
+                if dist1 <= dist2 :
+                    theta = -theta
+
+            xx = f_mat[i-1][i]*np.cos(theta + theta0)
+            yy = f_mat[i-1][i]*np.sin(theta + theta0)
+            theta0 = theta + theta0
+
+            x.append(xx + x[i-1])
+            y.append(yy + y[i-1])
+
+        curves[ind, :, 0] = np.array(x)
+        curves[ind, :, 1] = np.array(y)
+
+    return curves
+
+def features_from_curves(coupler_motion, n_points=50):
+    feature_vector_cm = []
+
+    n_points = 50
+
+    i = 0
+    j = 0
+    cm = np.zeros((coupler_motion.shape[0],n_points,3))
+    step = int((coupler_motion.shape[1])/(n_points-1))
+    for _ in range(n_points):
+        if i == 0:
+            cm[:,j,:] = np.copy(coupler_motion[:,i,:])
+        else:
+            cm[:,j,:] = np.copy(coupler_motion[:,i-1,:])
+        i += step
+        j += 1
+
+    k = 0
+    for i in range(n_points):
+        for j in range(n_points):
+            if i < j and j <= i + 3 :
+                a = np.sqrt((cm[:,j,0] - cm[:,i,0])**2 + (cm[:,j,1] - cm[:,i,1])**2)
+                feature_vector_cm.append(a)
+                k += 1
+
+    feature_vector_cm = np.array([feature_vector_cm])
+    feature_vector_cm = np.transpose(feature_vector_cm, [2,1,0])
+    return feature_vector_cm
+
+def get_transformed_joints_data(d):
+    coupler_motion = []
+    arc1_path = []
+    arc2_path = []
+    center_point1 = []
+    center_point2 = []
+    sixbar_2r_fg = []
+    sixbar_2r_arc = []
+    sixbar_fourbar_motion = []
+
+    for i, (curve, joints, sign) in enumerate(zip(d['coupler_curves'].curves, d['coupler_curves'].joints, d['coupler_curves'].signs), 0):
+        if len(curve) != 0:
+            try:
+                x = np.copy(np.array([pt['Cp0'][0] for pt in joints]))
+                y = np.copy(np.array([pt['Cp0'][1] for pt in joints]))
+                angle = np.copy(np.array([pt['Cp0'][2] for pt in joints]))
+            except:
+                x = np.copy(np.array([pt['C'][0] for pt in joints]))
+                y = np.copy(np.array([pt['C'][1] for pt in joints]))
+                angle = np.copy(np.array([pt['theta'] for pt in joints]))
+
+            x, y, angle = parametrize_path(x, y, angle)
+            angle = normalize_angle(angle)
+
+            x, y, scale, dx, dy = normalize_path(x, y, return_tf=True)
+            phi = -get_pca_inclination(x, y)
+
+
+            cmx = np.array([pt['C'][0] for pt in joints])
+            cmy = np.array([pt['C'][1] for pt in joints])
+
+            cmx, cmy = parametrize_path(cmx, cmy)
+            cm = np.array([[cmx, cmy, np.ones(cmy.shape)]])
+            cm = np.transpose(cm, [0,2,1])
+
+
+            b0x = np.array([pt['B0'][0] for pt in joints])
+            b0y = np.array([pt['B0'][1] for pt in joints])
+
+            b1x = np.array([pt['B1'][0] for pt in joints])
+            b1y = np.array([pt['B1'][1] for pt in joints])
+
+            try:
+                sixcp1x = np.array([pt['Cp0'][0] for pt in joints])
+                sixcp1y = np.array([pt['Cp0'][1] for pt in joints])
+
+                e0x = np.array([pt['E0'][0] for pt in joints])
+                e0y = np.array([pt['E0'][1] for pt in joints])
+
+                d0x = joints[0]['D0'][0]
+                d0y = joints[0]['D0'][1]
+
+            except KeyError:
+                pass
+
+
+            b0x, b0y = parametrize_path(b0x, b0y)
+            b1x, b1y = parametrize_path(b1x, b1y)
+
+
+            try:
+                sixcp1x, sixcp1y = parametrize_path(sixcp1x, sixcp1y)
+                e0x, e0y = parametrize_path(e0x, e0y)
+            except:
+                pass
+
+            arc1 = np.transpose([[b0x, b0y, np.ones(b0x.shape)]], [0,2,1] )
+            arc2 = np.transpose([[b1x, b1y, np.ones(b0x.shape)]], [0,2,1] )
+
+            try:
+                sixcp = np.transpose([[sixcp1x, sixcp1y, np.ones(b0x.shape)]], [0,2,1] )
+                sixarc = np.transpose([[e0x, e0y, np.ones(b0x.shape)]], [0,2,1] )
+                sixfg = np.array([[[d0x, d0y, 1.0]]])
+            except:
+                pass
+
+            cp = np.array([[[0.0, 0.0, 1.0]]])
+            cp2 = np.array([[[1.0, 0.0, 1.0]]])
+
+            cm = planar_rigid_body_transformation_on_path(cm, t=[-dx, -dy], phi=0, Trans=None)
+            cm = planar_rigid_body_transformation_on_path(cm, t=[0, 0], phi=phi, Trans=None)
+
+            arc1 = planar_rigid_body_transformation_on_path(arc1, t=[-dx, -dy], phi=0, Trans=None)
+            arc1 = planar_rigid_body_transformation_on_path(arc1, t=[0, 0], phi=phi, Trans=None)
+
+            arc2 = planar_rigid_body_transformation_on_path(arc2, t=[-dx, -dy], phi=0, Trans=None)
+            arc2 = planar_rigid_body_transformation_on_path(arc2, t=[0, 0], phi=phi, Trans=None)
+
+            try:
+                sixarc = planar_rigid_body_transformation_on_path(sixarc, t=[-dx, -dy], phi=0, Trans=None)
+                sixarc = planar_rigid_body_transformation_on_path(sixarc, t=[0, 0], phi=phi, Trans=None)
+
+                sixfg = planar_rigid_body_transformation_on_path(sixfg, t=[-dx, -dy], phi=0, Trans=None)
+                sixfg = planar_rigid_body_transformation_on_path(sixfg, t=[0, 0], phi=phi, Trans=None)
+
+                sixcp = planar_rigid_body_transformation_on_path(sixcp, t=[-dx, -dy], phi=0, Trans=None)
+                sixcp = planar_rigid_body_transformation_on_path(sixcp, t=[0, 0], phi=phi, Trans=None)
+            except:
+                pass
+
+            cp = planar_rigid_body_transformation_on_path(cp, t=[-dx, -dy], phi=0, Trans=None)
+            cp = planar_rigid_body_transformation_on_path(cp, t=[0, 0], phi=phi, Trans=None)
+
+            cp2 = planar_rigid_body_transformation_on_path(cp2, t=[-dx, -dy], phi=0, Trans=None)
+            cp2 = planar_rigid_body_transformation_on_path(cp2, t=[0, 0], phi=phi, Trans=None)
+
+            arc1 = planar_scaling_on_path(arc1, 1.0/scale)
+            arc2 = planar_scaling_on_path(arc2, 1.0/scale)
+            cm = planar_scaling_on_path(cm, 1.0/scale)
+            cm[:,:,2] = angle
+
+            try:
+                sixcp = planar_scaling_on_path(sixcp, 1.0/scale)
+                sixarc = planar_scaling_on_path(sixarc, 1.0/scale)
+                sixfg = planar_scaling_on_path(sixfg, 1.0/scale)
+            except:
+                pass
+
+            cp = planar_scaling_on_path(cp, 1.0/scale)
+            cp2 = planar_scaling_on_path(cp2, 1.0/scale)
+
+            try:
+                coupler_motion.append(sixcp)
+                sixbar_2r_arc.append(sixarc)
+                sixbar_2r_fg.append(sixfg)
+                sixbar_fourbar_motion.append(cm)
+            except:
+                coupler_motion.append(cm)
+            arc1_path.append(arc1[:,:,:2])
+            arc2_path.append(arc2[:,:,:2])
+            center_point1.append(cp[:,:,:2])
+            center_point2.append(cp2[:,:,:2])
+
+    coupler_motion = np.reshape(coupler_motion, [-1, 100, 3])
+    arc1_path = np.reshape(arc1_path, [-1, 100, 2])
+    arc2_path = np.reshape(arc2_path, [-1, 100, 2])
+    arc2_path = np.reshape(arc2_path, [-1, 100, 2])
+    center_point1 = np.reshape(center_point1, [-1, 1, 2])
+    center_point2 = np.reshape(center_point2, [-1, 1, 2])
+    if len(sixbar_2r_arc) != 0:
+        sixbar_2r_arc = np.reshape(sixbar_2r_arc, [-1, 100, 2])
+        sixbar_2r_fg = np.reshape(sixbar_2r_fg, [-1, 1, 2])
+        sixbar_fourbar_motion = np.reshape(sixbar_fourbar_motion, [-1, 100, 3])
+
+    return coupler_motion, arc1_path, arc2_path, center_point1, center_point2, sixbar_2r_arc, sixbar_2r_fg, sixbar_fourbar_motion
 
 def normalize_angle(angle):
     diff_angle = [0]
@@ -18,22 +253,29 @@ def normalize_angle(angle):
                 diff_angle[i] = - delta*np.sign(diff_angle[i])
 
     # Normalizing angle
-    normalized_angle = np.cumsum(diff_angle)
-    return normalized_angle
+    angle = np.cumsum(diff_angle)
+    return np.copy(angle)
 
-def signature(x, y, angle, ax=None, ax2=None, ax3=None, label='', steps=100, output_steps = 100):
+def signature(x, y, angle=None, steps=100, output_steps = 50):
     """ Obtains the invariant signature of motion
     """
-    diff_angle = [0]
-    for i in range(1,len(angle)):
-            diff_angle.append(angle[i] - angle[i-1])
-            if np.abs(diff_angle[i]) >= np.pi:
-                # Calculate absolute diff
-                delta = 2*np.pi - np.abs(diff_angle[i])
-                diff_angle[i] = - delta*np.sign(diff_angle[i])
+    u = np.arange(0, 1, 1/steps)
 
-    # Normalizing angle
-    angle = np.cumsum(diff_angle)
+    if angle is not None:
+        diff_angle = [0]
+        for i in range(1,len(angle)):
+                diff_angle.append(angle[i] - angle[i-1])
+                if np.abs(diff_angle[i]) >= np.pi:
+                    # Calculate absolute diff
+                    delta = 2*np.pi - np.abs(diff_angle[i])
+                    diff_angle[i] = - delta*np.sign(diff_angle[i])
+
+        # Normalizing angle
+        angle = np.cumsum(diff_angle)
+        normalized_angle = np.copy(angle)
+        tck_angle, _ = splprep(x=[angle], k=3, s=0)
+        angle = splev(u, tck_angle)[0]
+
     # Step 1
     """ 1. This step covers any pre-processing required to de-noise and convert
             the input curve to a parametric representation such that the curvature
@@ -41,30 +283,10 @@ def signature(x, y, angle, ax=None, ax2=None, ax3=None, label='', steps=100, out
             the input is a digitized point set, one option is to approximate with a
             parametric cubic B-spline curve.
     """
-    #if ax2 is not None:
-    #    ax2.plot(x, y, '*', ms=4, label=label+' : B-Spline')
-    #    ax2.plot(x, y, '*', ms=4, label=label)
-    # Uniform Arc Length Parametrization
-    u_arc = [0]
-    dist = 0
-    x_mean = np.mean(np.max(x)+np.min(x))
-    y_mean = np.mean(np.max(y)+np.min(y))
-    for i in range(1,len(x)):
-        dist = dist + np.power((x[i] - x_mean)**2 + (y[i] - y_mean)**2, 0.5)
-        u_arc.append(dist)
-    u_arc = u_arc/u_arc[-1]
-
     # Preparing Spline of fitting Path
-    #tck, _ = splprep(x=[x, y, angle], u=u_arc, k=3, s=0)
-    tck, _ = splprep(x=[x, y, angle], k=3, s=0)
+    tck, _ = splprep(x=[x, y], k=3, s=0)
     # Evaluating Spline for many points for smoother evaluation
-    u = np.arange(0, u_arc[-1], u_arc[-1]/steps)
-    x, y, angle = splev(u, tck)
-    normalized_angle = np.copy(angle)
-    if ax2 is not None:
-        ax2.plot(x, y, '--', ms=2, lw=2, label=label+' : B-Spline')
-        ax2.plot(x[0], y[0], '*', ms=10, label=label+': Start Point')
-        #ax2.plot(x, y, 'o', ms=2, label='B-spline')
+    x, y = splev(u, tck)
 
     """
         2. Sample the curvature of the curve at equal arc length intervals. Figure
@@ -78,7 +300,7 @@ def signature(x, y, angle, ax=None, ax2=None, ax3=None, label='', steps=100, out
     # Cross Product
     cur_z = - a[0]*v[1] + a[1]*v[0]
     # Curvature
-    curvature = cur_z / np.power((v[0]**2 + v[1]**2), 3/2)
+    curvature = cur_z / np.power((v[0]**2 + v[1]**2), 1)
     """
         3. Integrate the unsigned curvatures along the curve by summing the absolute
             values of curvatures discretely sampled along the curve. Plot the
@@ -88,9 +310,6 @@ def signature(x, y, angle, ax=None, ax2=None, ax3=None, label='', steps=100, out
     # Cumulative Integral Calculation
     K = integrate.cumtrapz(np.abs(curvature), u)
     K = np.concatenate((np.array([0]), K))
-    if ax is not None:
-        ax.plot(K, curvature, 'o', ms=4)
-        pass
 
     """
         4. Compute curvature (k) of the curve at equal-interval-sampled points
@@ -110,23 +329,32 @@ def signature(x, y, angle, ax=None, ax2=None, ax3=None, label='', steps=100, out
     u_cur = u_cur/u_cur[-1]
 
     # Preparing Spline of fitting Path
-    tck_cur, _ = splprep(x=[K, curvature, angle], u=u_cur, k=3, s=0)
+    #tck_cur, _ = splprep(x=[K, curvature, angle, u], u=u_cur, k=3, s=0)
+    tck_K, _ = splprep(x=[K], u=u_cur, k=3, s=0)
+    tck_cur, _ = splprep(x=[curvature], u=u_cur, k=3, s=0)
+    if angle is not None:
+        tck_ang, _ = splprep(x=[angle], u=u_cur, k=3, s=0)
     # Evaluating Spline for many points for smoother evaluation
     # adaptive step size based on curvature integral
     # for comparing correlation steps = 1/(K[-1]*100)
     u_ = np.arange(0, 1, 1.0/output_steps)
     K_init, curvature_init = K, curvature
-    K, curvature, angle = splev(u_, tck_cur)
-
-    if ax is not None:
-        ax.plot(K, curvature, '*-', ms=4, lw=2)
+    #K, curvature, angle, _ = splev(u_, tck_cur)
+    K = splev(u_, tck_K)[0]
+    curvature = splev(u_, tck_cur)[0]
+    if angle is not None:
+        angle = splev(u_, tck_ang)[0]
 
     u_1 = np.arange(0, 1, 1.0/K[-1]/100)
-    _, path_sign, motion_sign = splev(u_1, tck_cur)
-    if ax3 is not None:
-        ax3.plot(path_sign, '*-', ms=4, lw=2)
+    #_, path_sign, motion_sign, u_new = splev(u_1, tck_cur)
+    path_sign = splev(u_1, tck_cur)[0]
+    if angle is not None:
+        motion_sign = splev(u_1, tck_ang)[0]
 
-    return {'path_sign': path_sign, 'motion_sign':motion_sign, 'fixed_path_sign':np.array([curvature, K]), 'fixed_motion_sign':np.array([angle, K]), 'normalized_angle':normalized_angle, 'x':x, 'y':y}
+    if angle is not None:
+        return {'path_sign': path_sign, 'motion_sign':motion_sign, 'fixed_path_sign':np.array([curvature, K]), 'fixed_motion_sign':np.array([angle, K]), 'normalized_angle':normalized_angle, 'x':x, 'y':y}
+    else:
+        return {'path_sign': path_sign, 'fixed_path_sign':np.array([curvature, K]), 'x':x, 'y':y}
 
 class CouplerCurves:
     def __init__(self):
@@ -140,7 +368,16 @@ class CouplerCurves:
         self.curv8 = []
         self.circuit = True
         self.signs = []
+        self.curve_type = []
         self.crank_changed = False
+        self.joints0 = []
+        self.joints1 = []
+        self.joints2 = []
+        self.joints3 = []
+        self.joints4 = []
+        self.joints5 = []
+        self.joints6 = []
+        self.joints7 = []
 
     def push_point(self, points):
         if self.crank_changed:
@@ -157,6 +394,23 @@ class CouplerCurves:
             else:
                 self.curv3.append(points[0])
                 self.curv4.append(points[1])
+
+    def push_joints(self, points):
+        if self.crank_changed:
+            if self.circuit:
+                self.joints4.append(points[0])
+                self.joints5.append(points[1])
+            else:
+                self.joints6.append(points[0])
+                self.joints7.append(points[1])
+        else:
+            if self.circuit:
+                self.joints0.append(points[0])
+                self.joints1.append(points[1])
+            else:
+                self.joints2.append(points[0])
+                self.joints3.append(points[1])
+
     def change_crank(self):
         self.circuit = True
         self.crank_changed = True
@@ -178,23 +432,28 @@ class CouplerCurves:
         self.curv6 = np.array(self.curv6)
         self.curv7 = np.array(self.curv7)
         self.curv8 = np.array(self.curv8)
-        self.curves = [self.curv1, self.curv2, self.curv3, self.curv4, self.curv5, self.curv6, self.curv7, self.curv8]
+        self.curves = []
+        self.joints = []
+        self.curves_all = [self.curv1, self.curv2, self.curv3, self.curv4, self.curv5, self.curv6, self.curv7, self.curv8]
+        full_joint_data = [self.joints0, self.joints1, self.joints2, self.joints3, self.joints4, self.joints5, self.joints6, self.joints7]
         if only_first_curve:
             if len(self.curv1) >= 4:
+                if len(curve) == 360:
+                    self.curve_type.append('grashof')
+                else:
+                    self.curve_type.append('non-grashof')
                 self.signs.append(signature(x=self.curv1[:,0], y=self.curv1[:,1], angle=self.curv1[:,2]))
+                self.curves.append(np.array(self.curv1))
         else:
-            if len(self.curv1) >= 4:
-                self.signs.append(signature(x=self.curv1[:,0], y=self.curv1[:,1], angle=self.curv1[:,2]))
-                self.signs.append(signature(x=self.curv2[:,0], y=self.curv2[:,1], angle=self.curv2[:,2]))
-            if len(self.curv3) >= 4:
-                self.signs.append(signature(x=self.curv3[:,0], y=self.curv3[:,1], angle=self.curv3[:,2]))
-                self.signs.append(signature(x=self.curv4[:,0], y=self.curv4[:,1], angle=self.curv4[:,2]))
-            if len(self.curv5) >= 4:
-                self.signs.append(signature(x=self.curv5[:,0], y=self.curv5[:,1], angle=self.curv5[:,2]))
-                self.signs.append(signature(x=self.curv6[:,0], y=self.curv6[:,1], angle=self.curv6[:,2]))
-            if len(self.curv7) >= 4:
-                self.signs.append(signature(x=self.curv7[:,0], y=self.curv7[:,1], angle=self.curv7[:,2]))
-                self.signs.append(signature(x=self.curv8[:,0], y=self.curv8[:,1], angle=self.curv8[:,2]))
+            for curve, joints in zip(self.curves_all, full_joint_data):
+                if len(curve) >= 4:
+                    if len(curve) == 360:
+                        self.curve_type.append('grashof')
+                    else:
+                        self.curve_type.append('non-grashof')
+                    self.signs.append(signature(x=curve[:,0], y=curve[:,1], angle=curve[:,2]))
+                    self.curves.append(np.array(curve))
+                    self.joints.append(joints)
 
     def plot_curves(self, ax, label='', mark='-*'):
         i = 0
@@ -217,6 +476,33 @@ class CouplerCurves:
             ax.plot(self.curv7[:,0], self.curv7[:,1], mark , ms=1,lw=1, label=label+'%d'%i)
             i += 1
             ax.plot(self.curv8[:,0], self.curv8[:,1], mark , ms=1,lw=1, label=label+'%d'%i)
+        return ax
+
+def normalize_path(x, y, return_tf=False):
+    var = np.sqrt(np.var(x) + np.var(y))
+    xx = np.copy((x - np.mean(x))/var)
+    yy = np.copy((y - np.mean(y))/var)
+    if return_tf:
+        return xx, yy, var, np.mean(x), np.mean(y)
+    else:
+        return xx, yy
+
+def parametrize_path(x, y, angle=None,steps=100):
+    u = np.arange(0, 1, 1/steps)
+    # Evaluating Spline for many points for smoother evaluation
+    if angle is None:
+        tck, _ = splprep(x=[x, y], k=3, s=0)
+        xx, yy = splev(u, tck)
+        return xx, yy
+    else:
+        #angle = np.array([angle])
+        tck, _ = splprep(x=[x, y], k=3, s=0)
+        xx, yy = splev(u, tck)
+
+        lin_sp = np.linspace(0, 1, angle.shape[0])
+        ang = UnivariateSpline(lin_sp, angle, s=0)
+        angle_ = ang(np.linspace(0, 1, steps))
+        return xx, yy, angle_
 
 def sample_logNormal_link_params(random_params=True):
     params = np.zeros((5,))
@@ -233,7 +519,7 @@ def sample_logNormal_link_params(random_params=True):
         for i in range(3, 5):
             params[i] = np.random.normal(0, 3, 1)
         if not random_params:
-            params = np.array([2, 1, 1, 0.5, 0.5])
+            params = np.array([1.35803273, 3.58919406, 3.44406587, 0.29715139, 0.80377864])
         success = is_feasible_fourbar(params)
     return params
 
@@ -247,50 +533,41 @@ def is_feasible_fourbar(params):
     else:
         return True
 
-def simulate_fourbar(params, timing = None, both_branches=True, only_first_curve=False, all_joints=False):
+def simulate_fourbar(params, start = None, both_branches=True, all_joints=True, fb_type='fourR', kwargs=None):
     l1,l2,l3,l4,l5 = params
-    coupler_curves = CouplerCurves()
-    full_data = []
     circuit_changed = False
-    if only_first_curve:
-        both_branches = False
-    if timing is None:
-        timing = np.arange(0.0, 2*np.pi, np.pi/180.0)
-    for theta in timing:
-        success, output = fourbar_fk(l1,l2,l3,l4,l5,theta, all_joints=True)
-        if success:
-            coupler_pose = np.array([[output['C'][0][0], output['C'][0][1], output['theta'][0]], [output['C'][1][0], output['C'][1][1], output['theta'][1]]])
-            if all_joints:
-                if coupler_curves.circuit:
-                    full_data.append(output)
-            coupler_curves.push_point(coupler_pose)
-            circuit_changed = False
+    if start is None:
+        start = np.random.uniform(0, 2*np.pi)
+    timing = np.arange(0.0 + start, 2*np.pi + start, np.pi/180.0)
+    temp = deque()
+    joint_data = deque()
+    i = 0
+    incr = 1
+    circuit_break = False
+    while not (circuit_break or i == 360):
+        if fb_type=='fourR':
+            success, output = fourbar_fk(l1,l2,l3,l4,l5,timing[i], all_joints=True, kwargs=kwargs)
         else:
-            if not circuit_changed:
-                coupler_curves.change_circuit()
-                circuit_changed = True
-    if both_branches:
-        circuit_changed = False
-        coupler_curves.change_crank()
-        for theta in timing:
-            success, output = fourbar_fk(l2,l1,l3,-l4,l5,theta, all_joints=True)
-            if success:
-                coupler_pose = np.array([[output['C'][0][0], output['C'][0][1], output['theta'][0]], [output['C'][1][0], output['C'][1][1], output['theta'][1]]])
-                coupler_curves.push_point(coupler_pose)
-                if all_joints:
-                    full_data.append(output)
-                circuit_changed = False
+            success, output = slidercrank_fk(l1,l2,l3,l4,l5,timing[i], all_joints=True, kwargs=kwargs)
+        if success:
+            if incr == 1:
+                temp.append(output[0])
             else:
-                if not circuit_changed:
-                    coupler_curves.change_circuit()
-                    circuit_changed = True
-    coupler_curves.finish(only_first_curve)
-    if all_joints:
-        return coupler_curves, full_data
-    else:
-        return coupler_curves
+                temp.appendleft(output[0])
+        else:
+            if not circuit_break and len(temp) > 0:
+                joint_data = temp.copy()
+                temp = deque()
+                circuit_break = True
+                i = 0
+                incr = -1
+            elif circuit_break:
+                break
+        i += incr
+    joint_data = temp + joint_data
+    return joint_data
 
-def fourbar_fk(l1,l2,l3,l4,l5,theta, all_joints=False, **kwargs):
+def fourbar_fk(l1,l2,l3,l4,l5,theta, all_joints=False, kwargs=None):
     """ Calculates forward kinematics
         returns a dict of joint information and coupler_angles
     """
@@ -301,14 +578,108 @@ def fourbar_fk(l1,l2,l3,l4,l5,theta, all_joints=False, **kwargs):
         except KeyError:
             fg = np.array([0, 0])
             sg = np.array([1, 0])
-
+    else:
+        fg = np.array([0, 0])
+        sg = np.array([1, 0])
     # fg = Crank ground joint
     # sg = Second ground joind
     # First Floating Point
-    fe = np.array([l1*np.cos(theta), l1*np.sin(theta)])
+    fe = fg +  np.array([l1*np.cos(theta), l1*np.sin(theta)])
     condition = (l2 + l3 > getDistance(sg,fe)) and (abs(l2 - l3) < getDistance(sg,fe))
     if not condition:
         return False, [0]
+
+    c1, c2, l3_inclination1, l3_inclination2, se1, se2 = fk_interm_step(fe, sg, l2, l3, l4, l5)
+
+    if all_joints:
+        return True, [{'A0': fg, 'A1': sg, 'B0': fe, 'B1': se1, 'phi': theta, 'C':c1, 'theta': l3_inclination1},{'A0': fg, 'A1': sg, 'B0': fe, 'B1': se2, 'phi': theta, 'C':c2, 'theta': l3_inclination2}]
+    else:
+        return True, np.array([[c1[0], c1[1], l3_inclination1], [c2[0], c2[1], l3_inclination2]])
+
+def slidercrank_fk(l1,l2,l3,l4,phi,theta, all_joints=False, **kwargs):
+    """ Calculates forward kinematics
+        returns a dict of joint information and coupler_angles
+    """
+    if kwargs is not None:
+        try:
+            fg = kwargs['fg']
+            sg = kwargs['sg']
+        except KeyError:
+            fg = np.array([np.cos(phi), np.sin(phi)])
+            sg = np.array([0, 0])
+
+    '''
+    l1 = crank length
+    l2 = connecting rod length
+    l3 = coupler length along connecting rod
+    l4 = coupler length perpendicular to l3
+    phi = orientation of fix joint from origin
+
+    fg = Crank ground joint (on the circle with at phi angle)
+    sg = Second ground joind
+    First Floating Point
+    '''
+    fe = np.array([l1*np.cos(theta), l1*np.sin(theta)]) + fg
+    #condition = (l2 + l3 > getDistance(sg,fe)) and (abs(l2 - l3) < getDistance(sg,fe))
+    condition = l2 >= np.abs(fe[1])
+    if not condition:
+        return False, [0]
+
+    # l2 sin(temp) = fe[1]
+    temp = np.arcsin(fe[1]/l2)
+    x_offset = l2*np.cos(temp)
+    se1 = np.array([fe[0]+x_offset, 0])
+    se2 = np.array([fe[0]-x_offset, 0])
+    # Second Floating Points
+    l3_inclination1 = np.arctan2(se1[1]-fe[1], se1[0]-fe[0])
+    l3_inclination2 = np.arctan2(se2[1]-fe[1], se2[0]-fe[0])
+    temp = getEndPoint((fe+se1)/2, l3, l3_inclination1)
+    c1 = getEndPoint(temp, l4, l3_inclination1 + np.pi/2.0)
+    temp = getEndPoint((fe+se2)/2, l3, l3_inclination2)
+    c2 = getEndPoint(temp, l4, l3_inclination2 + np.pi/2.0)
+    if all_joints:
+        return True, [{'A0': fg, 'A1': sg, 'B0': fe, 'B1': se1, 'phi': theta, 'C':c1, 'theta': l3_inclination1},{'A0': fg, 'A1': sg, 'B0': fe, 'B1': se2, 'phi': theta, 'C':c2, 'theta': l3_inclination2}]
+    else:
+        return True, np.array([[c1[0], c1[1], l3_inclination1], [c2[0], c2[1], l3_inclination2]])
+
+def get_grashof_2R_link_params(curve):
+    ''' How to find parameters of 2R manipulators such that its workspace
+        should include c curve
+    '''
+    n_points, dim = curve.shape
+    var = np.sqrt(np.var(curve[:,0])**2 + np.var(curve[:,1])**2)
+    x = np.random.normal(np.mean(curve[:,0]),2*var)
+    y = np.random.normal(np.mean(curve[:,1]),2*var)
+    sg = [x, y]
+    r_min = np.min(np.sqrt((curve[:,0]-x)**2 + (curve[:,1]-y)**2))
+    r_max = np.max(np.sqrt((curve[:,0]-x)**2 + (curve[:,1]-y)**2))
+    ''' making choice here, that r1 is always grater than r2
+        r1 + r2 = r_max * 1.2 (here 1.2 is given for avoiding singularity
+        r1 - r2 = r_min * 0.8 (here 1.2 is given for avoiding singularity
+        example:
+        r1 = (r_min*0.8 + r_max*1.2)/2.0
+        r2 = (r_max*1.2 - r_min*0.8)/2.0
+    '''
+    r_min = r_min*np.random.uniform(0.1, 0.9)
+    r_max = r_max*np.random.uniform(1.1, 1.9)
+    r1 = (r_min + r_max)/2.0
+    r2 = (r_max - r_min)/2.0
+
+    return sg, r1, r2
+
+
+def fk_interm_step(fe, sg, l2, l3, l4, l5):
+    '''
+    fe is end point of crank or some motion,
+    l2, l3 are the lengths of 2R manipulator reaching fe.
+    l4 and l4 are coupler dimensions
+
+    output is coupler end point and orientation
+    '''
+    condition = (l2 + l3 > getDistance(sg,fe)) and (abs(l2 - l3) < getDistance(sg,fe))
+    if not condition:
+        print('distance between sg, fe is %0.3f'%getDistance(sg,fe) + ', where l1 =%0.3f, l2=%0.3f'%(l2,l3))
+    assert condition
 
     x_inclination = np.arctan2(sg[1]-fe[1], sg[0]-fe[0])
     x1, y1 = fe
@@ -328,12 +699,162 @@ def fourbar_fk(l1,l2,l3,l4,l5,theta, all_joints=False, **kwargs):
     c1 = getEndPoint(temp, l5, l3_inclination1 + np.pi/2.0)
     temp = getEndPoint((fe+se2)/2, l4, l3_inclination2)
     c2 = getEndPoint(temp, l5, l3_inclination2 + np.pi/2.0)
-    if all_joints:
-        return True, {'A0': np.array([fg, fg]), 'A1': np.array([sg, sg]), 'B0': np.array([fe, fe]), 'B1': np.array([se1, se2]), 'phi': theta, 'C':np.array([c1, c2]), 'theta': np.array([l3_inclination1, l3_inclination2])}
-    else:
-        return True, np.array([[c1[0], c1[1], l3_inclination1], [c2[0], c2[1], l3_inclination2]])
+    return c1, c2, l3_inclination1, l3_inclination2, se1, se2
 
-def normalized_cross_corelation(s1, s2, ax=None, ax2=None):
+def sixbar_watt_fk(theta0, r0, r1, r2, r3, r4, four_bar_params, theta, fb_type = 'fourR' , all_joints=False, grashof_sixbar=True, **kwargs):
+    if kwargs is not None:
+        try:
+            fg = kwargs['fg']
+            sg = kwargs['sg']
+        except KeyError:
+            if fb_type == 'sliderCrank':
+                l1, l2, l3, l4, phi = four_bar_params
+                fg = np.array([np.cos(phi), np.sin(phi)])
+                sg = np.array([0, 0])
+                success, output = slidercrank_fk(l1, l2, l3, l4, phi, theta, all_joints=all_joints, **kwargs)
+            elif fb_type == 'fourR':
+                l1, l2, l3, l4, l5 = four_bar_params
+                fg = np.array([0, 0])
+                sg = np.array([1, 0])
+                success, output = fourbar_fk(l1, l2, l3, l4, l5, theta, all_joints=all_joints, **kwargs)
+
+    if success:
+        if not all_joints:
+            c1 = output[0,:2]
+            c2 = output[0,:2]
+        else:
+            c1, c2 = output['C']
+    else:
+        return False, [0]
+
+    if grashof_sixbar:
+        sg1, r11, r21 = get_grashof_2R_link_params(c1)
+        sg2, r12, r22 = get_grashof_2R_link_params(c2)
+    else:
+        theta01, r01, r11, r21 = theta0, r0, r1, r2
+        theta02, r02, r12, r22 = theta0, r0, r1, r2
+        sg1 = np.array([r01*np.cos(theta01), r01*np.sin(theta01)])
+        sg2 = np.array([r02*np.cos(theta02), r02*np.sin(theta02)])
+
+    try:
+        cp11, cp12, c_angle11, c_angle12, se11, se12 = fk_interm_step(c1, sg1, r11, r21, r3, r4)
+    except AssertionError:
+        print(AssertionError)
+        cp11, cp12, c_angle11, c_angle12, se11, se12 = None, None, None, None, None, None
+    try:
+        cp21, cp22, c_angle21, c_angle22, se21, se21 = fk_interm_step(c2, sg2, r12, r22, r3, r4)
+    except AssertionError:
+        print(AssertionError)
+        cp21, cp22, c_angle21, c_angle22, se21, se21 = None, None, None, None, None, None
+
+    if cp11 is None and cp21 is None:
+        return False, [0]
+
+    # [{'A0': fg, 'A1': sg, 'B0': fe, 'B1': se1, 'phi': theta, 'C':c1, 'theta': l3_inclination1},{'A0': fg, 'A1': sg, 'B0': fe, 'B1': se2, 'phi': theta, 'C':c2, 'theta': l3_inclination2}]
+    sixbar_output = [
+            {
+            'C': np.array([cp11[0], cp11[1], c_angle11]),
+            'B0': c1,
+            'B10': se11,
+            },
+            {
+            'C': np.array([cp12[0], cp12[1], c_angle12]),
+            'B0': c2,
+            'B10': se21,
+            }
+            #'C3': np.array([output[1, 0], output[1, 1], output[1, 2]]),
+            #'C3': np.array([cp21[0], cp21[1], c_angle21]),
+            #'C4': np.array([cp22[0], cp22[1], c_angle22]),
+            ]
+
+    return True, sixbar_output
+    '''
+    params exlusive to sixbars
+    fg = Crank ground joint (on the circle with at phi angle)
+    sg = Second ground joind
+    First Floating Point
+    '''
+
+def simulate_sixbar(params, timing = None, both_branches=True, only_first_curve=False, all_joints=False, fb_type='fourR', grashof_sixbar=True):
+    l1,l2,l3,l4,l5, theta0, r0, r1, r2, r3, r4 = params
+    fourbar_params = l1,l2,l3,l4,l5
+    if fb_type == 'fourR':
+        coupler_curves = simulate_fourbar(fourbar_params, all_joints=True, both_branches=False)
+    elif fb_type == 'slider-crank-linkage':
+        coupler_curves = simulate_fourbar(fourbar_params, fb_type='sliderCrank', all_joints=True)
+    for curve, joint_data in zip(coupler_curves.curves, coupler_curves.joints):
+        if grashof_sixbar:
+            sg, r1, r2 = get_grashof_2R_link_params(curve)
+            theta0 = np.arctan2(sg[1], sg[0])
+        else:
+            sg = np.array([r0*np.cos(theta0), r0*np.sin(theta0)])
+        for c, joint in zip(curve, joint_data):
+            try:
+                cp11, cp12, c_angle11, c_angle12, se11, se12 = fk_interm_step(c[:2], sg, r1, r2, r3, r4)
+            except AssertionError:
+                cp11, cp12, c_angle11, c_angle12, se21, se22 = None, None, None, None, None, None
+
+            if cp11 is None:
+                return False, [0]
+            else:
+                joint['Cp0'] = np.array([cp11[0], cp11[1], c_angle11])
+                joint['Cp1'] = np.array([cp12[0], cp12[1], c_angle12])
+                joint['D0'] = sg
+                joint['E0'] = se11
+                joint['E1'] = se12
+
+    params = np.array([l1,l2,l3,l4,l5, theta0, r0, r1, r2, r3, r4])
+
+    coupler_curves.finish(only_first_curve)
+
+    return coupler_curves, params
+
+def simulate_sixbar_(params, timing = None, both_branches=True, only_first_curve=False, all_joints=False, fb_type='fourR', grashof_sixbar=True):
+    l1,l2,l3,l4,l5, theta0, r0, r1, r2, r3, r4 = params
+    fourbar_params = l1,l2,l3,l4,l5
+    coupler_curves = CouplerCurves()
+    circuit_changed = False
+    if only_first_curve:
+        both_branches = False
+    if timing is None:
+        timing = np.arange(0.0, 2*np.pi, np.pi/180.0)
+    if timing is 'random':
+        start = np.random.uniform(0, 2*np.pi)
+        timing = np.arange(0.0 + start, 2*np.pi + start, np.pi/180.0)
+
+    for theta in timing:
+        success, output = sixbar_watt_fk(theta0, r0, r1, r2, r3, r4, fourbar_params, theta, all_joints=all_joints, fb_type=fb_type, grashof_sixbar=grashof_sixbar)
+        if success:
+            coupler_pose = np.array([[output[0]['C'][0], output[0]['C'][1], output[0]['theta']], [output[1]['C'][0], output[1]['C'][1], output[1]['theta']]])
+            coupler_curves.push_point(coupler_pose)
+            if all_joints:
+                coupler_curves.push_joints(output)
+            coupler_curves.push_point(coupler_pose)
+            circuit_changed = False
+        else:
+            if not circuit_changed:
+                coupler_curves.change_circuit()
+                circuit_changed = True
+    if both_branches and fb_type == 'fourR':
+        circuit_changed = False
+        coupler_curves.change_crank()
+        for theta in timing:
+            fourbar_params = l2,l1,l3,-l4,l5
+            success, output = sixbar_watt_fk(theta0, r0, r1, r2, r3, r4, fourbar_params, theta, all_joints=all_joints, fb_type=fb_type, grashof_sixbar=grashof_sixbar)
+            if success:
+                coupler_pose = np.array([[output[0]['C'][0], output[0]['C'][1], output[0]['theta']], [output[1]['C'][0], output[1]['C'][1], output[1]['theta']]])
+                coupler_curves.push_point(coupler_pose)
+                if all_joints:
+                    coupler_curves.push_joints(output)
+                circuit_changed = False
+            else:
+                if not circuit_changed:
+                    coupler_curves.change_circuit()
+                    circuit_changed = True
+    coupler_curves.finish(only_first_curve)
+    return coupler_curves
+
+def normalized_cross_corelation(s1, s2, ax=None, ax2=None, grashof=False):
     ''' Obtains similarity between two scaled signals
     s1 = sign1['path_sign']
     s2 = sign2['path_sign']
@@ -345,6 +866,9 @@ def normalized_cross_corelation(s1, s2, ax=None, ax2=None):
     else:
         t = s2
         F = s1
+
+    if grashof:
+        F = np.concatenate((F,F))
 
     if ax is not None:
         ax.plot(t, 'o', ms=5, lw=2, label='Templete')
@@ -568,6 +1092,44 @@ def get_pca_transform(qx, qy, ax=None, label=''):
     max_eig = 1/np.sqrt(np.max(eig_val))
     return Trans, ax, max_eig
 
+def get_pca_inclination(qx, qy, ax=None, label=''):
+    """ Performs the PCA
+        Return transformation matrix
+    """
+    cx = np.mean(qx)
+    cy = np.mean(qy)
+    covar_xx = np.sum((qx - cx)*(qx - cx))/len(qx)
+    covar_xy = np.sum((qx - cx)*(qy - cy))/len(qx)
+    covar_yx = np.sum((qy - cy)*(qx - cx))/len(qx)
+    covar_yy = np.sum((qy - cy)*(qy - cy))/len(qx)
+    covar = np.array([[covar_xx, covar_xy],[covar_yx, covar_yy]])
+    eig_val, eig_vec= np.linalg.eig(covar)
+
+    # Inclination of major principal axis w.r.t. x axis
+    if eig_val[0] > eig_val[1]:
+        phi= np.arctan2(eig_vec[1,0], eig_vec[0,0])
+    else:
+        phi= np.arctan2(eig_vec[1,1], eig_vec[0,1])
+
+    return phi
+
+def get_scale_factor(poses):
+    '''
+    poses has shape [1, num, 3]
+    '''
+    qx = poses[0,:,0]
+    qy = poses[0,:,1]
+    cx = np.mean(qx)
+    cy = np.mean(qy)
+    covar_xx = np.sum((qx - cx)*(qx - cx))/len(qx)
+    covar_xy = np.sum((qx - cx)*(qy - cy))/len(qx)
+    covar_yx = np.sum((qy - cy)*(qx - cx))/len(qx)
+    covar_yy = np.sum((qy - cy)*(qy - cy))/len(qx)
+    covar = np.array([[covar_xx, covar_xy],[covar_yx, covar_yy]])
+    eig_val, eig_vec= np.linalg.eig(covar)
+
+    return np.sqrt(np.sum(eig_val))
+
 def transform_poses(x,y,theta, ax=None, label=''):
     """ Translates and rotates path part of the poses along
         Principal Directions
@@ -636,74 +1198,6 @@ def getEndPoint(startPoint, length, angle):
 def getDistance(pt1,pt2):
         return np.sqrt(np.sum(np.power(pt1-pt2,2)));
 
-def getMotionError(x, *args):
-    """
-    Objective function of optimization routine which accepts
-    target path signature and link params namely l1,l2,l3,l4,l5
-    and returns an error function
-
-    x : params
-    target_path_sign : args[0]
-    verbose: args[1]
-    reversible: args[2]
-
-    """
-    target_path_sign = args[0]
-    verbose = False
-    reversible = False
-    if len(args) > 1:
-        verbose = args[1]
-        reversible = args[2]
-    min_score = 100
-    coupler_curves = simulate_fourbar(x)
-    i = 0
-    index = 0
-    for sign in coupler_curves.signs:
-        if(len(sign['motion_sign'])*1.3 >= len(target_path_sign['motion_sign']) or reversible):
-            score = motion_cross_corelation(sign, target_path_sign)['distance']
-            if verbose:
-                print('score for %d sign is %f:'%(i, score))
-            if score < min_score:
-                min_score = score
-                index = i
-        i += 1
-    print('min_score : %f'%min_score)
-    return min_score, index, coupler_curves
-
-def getPathError(x, *args):
-    """
-    Objective function of optimization routine which accepts
-    target path signature and link params namely l1,l2,l3,l4,l5
-    and returns an error function
-
-    x : params
-    target_path_sign : args[0]
-    verbose: args[1]
-    reversible: args[2]
-
-    """
-    target_path_sign = args[0]
-    verbose = False
-    reversible = False
-    if len(args) > 1:
-        verbose = args[1]
-        reversible = args[2]
-    min_score = 3
-    coupler_curves = simulate_fourbar(x)
-    i = 0
-    index = 0
-    for sign in coupler_curves.signs:
-        if(len(sign)*1.3 >= len(target_path_sign) or reversible):
-            score = 1 - normalized_cross_corelation(sign, target_path_sign)['score']
-            if verbose:
-                print('score for %d sign is %f:'%(i, score))
-            if score < min_score:
-                min_score = score
-                index = i
-        i += 1
-    #print('min_score : %f'%min_score)
-    return min_score, index, coupler_curves
-
 def getParams(linkage):
     link = json.loads(linkage)
     fe = np.array([link['linkageInfo'][1][3][1], link['linkageInfo'][1][4][1]])
@@ -713,69 +1207,3 @@ def getParams(linkage):
     l5 = lc*np.sin(ang)
     l4 = lc*np.cos(ang) - l3/2.0
     return [l1,l2,l3,l4,l5]
-
-if __name__=='__main__':
-    import plot
-    from matplotlib.patches import Ellipse
-    import random
-    x = np.load('../../data/npy/x.npy')
-    y = np.load('../../data/npy/y.npy')
-    theta = np.load('../../data/npy/theta.npy')
-    print(x.shape)
-    #distance_mat = np.load('../../data/npy/distance_matrix.npy')
-    #model = AgglomerativeClustering(n_clusters=10, linkage="average", affinity='precomputed')
-
-    #model.fit(distance_mat)
-
-    #cluster_index = 1
-    #j = 0
-    #cluster = []
-    #for i in model.labels_:
-    #    if cluster_index == i:
-    #        cluster.append(j)
-    #    j += 1
-    #c1 = np.argsort(distance_mat[cluster_index-1,:])
-
-    #print np.sort(distance_mat[cluster_index-1,:])[-10:]
-    #print c1[-10:]
-    #q_ind = [6720, 0]
-    #q_ind = [183, 4416, 7644, 8123, 9695, 10807, 11012, 15119, 15735, 18055, 19457, 19666, 19685, 24411, 24495, 24738, 25563, 25837, 26189, 29273]
-    #q_ind = [5829, 9439, 18152, 18706, 25678, 27816]
-    with open('../../data/cluster_base.pkl', 'rb') as f:
-        cluster = pickle.load(f)
-    #z_features = np.load('../../data/auto-encoder/motion_dnn/input.npy')
-    #cluster = KMeans(n_clusters=1000)
-    #cluster.fit(z_features)
-    cluster_index = 11
-    j = 0
-    clust = []
-    for i in cluster.labels_:
-        if cluster_index == i:
-            clust.append(j)
-        j += 1
-    print(clust)
-    q_ind = [clust[:100]]
-    qx, qy, qtheta = x[q_ind].tolist(), y[q_ind].tolist(), theta[q_ind].tolist()
-    fig, ax = plot.ax2d('Trajectories', axis='equal')
-    fig2, ax2 = plot.ax2d('Signatures of Trajectory')
-    fig3, ax3 = plot.ax2d('Orientation vs Curvature Integral')
-    fig4, ax4 = plot.ax2d('Correlation')
-    signs = []
-    i = 0
-    for xq, yq, thetaq in zip(qx, qy, qtheta):
-        traj = transform_poses(xq, yq, thetaq, ax=ax, label='%d'%i)
-        signs.append(signature(x=traj[:,0], y=traj[:,1], angle=traj[:,2], ax=ax2, ax2=ax, ax3=ax3, mark='-', label='%d'%i))
-        i += 1
-        #signs.append(signature(x=-traj[:,0], y=traj[:,1], angle=traj[:,2], ax2=ax, mark='-', label='%d'%i))
-        #j = 18
-        #traj = transform_poses(xq[:j]*2, yq[:j]*2, thetaq[:j], ax=ax, label='%d'%i)
-        #sign_2 = signature(x=traj[:,0], y=traj[:,1], angle=traj[:,2], ax=ax2, ax2=ax, ax3=ax3, mark='-', label='%d'%i)
-        #normalized_cross_corelation(sign_1, sign_2, ax=ax2, ax2=ax4)
-        #i += 1
-    similarity = normalized_cross_corelation(signs[0], signs[1], ax2=ax4)['score']
-    #print similarity
-    ax2.legend(loc='best')
-    ax3.legend(loc='best')
-    ax.legend(loc='best')
-    plot.plt.show()
-

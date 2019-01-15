@@ -3,51 +3,113 @@ Classic cart-pole system implemented by Rich Sutton et al.
 Copied from http://incompleteideas.net/sutton/book/code/pole.c
 permalink: https://perma.cc/C9ZM-652R
 """
-
+import os
 import math
 import gym
 from gym import spaces, logger
 from gym.utils import seeding
 import numpy as np
-from gym.envs.synthesis.utils import simulate_fourbar, is_feasible_fourbar, sample_logNormal_link_params
-from gym.envs.synthesis.utils import normalized_cross_corelation, normalize_angle, signature
+from gym.envs.synthesis.utils import normalized_cross_corelation, normalize_angle, signature, parametrize_path
 import matplotlib.pyplot as plt
+import requests
+import tensorflow as tf
+import pickle
+from gym.envs.synthesis.models import CuriosityAE
+from gym.envs.synthesis.ReplayBuffer import Dataset
 
-class FourBarPathEnv1(gym.Env):
+""" Init => State space : Options
+                    1. Relative position of all joints throughout the simulation and Coupler Curve State
+                    2. RNN State after inputing time sequence of all lelative position of all joints throughout the simulation and and Coupler Curve State
+            Action space : change the locations of moving pivots and coupler point (which also changes link ration implicitly)
+    Reset => Restore the mechanism to original position
+    Step => Take action and change the internal value of state and return state, and reward
+    Rewards => zero Extrinsic reward
+"""
+URL = "http://localhost:3000/simulation"
+
+def get_simulated_data(joint_state, linkage_type = 'fourbar'):
+    if linkage_type == 'fourbar':
+        input_text = make_fourbar_input_text(joint_state)
+        f = open('ip.txt','w')
+        f.write(input_text)
+        f.close()
+    info = {'data':input_text}
+    # sending get request and saving the response as response object
+    r = requests.post(url = URL, data = info)
+    return np.array(r.json()['joints'])
+
+def make_fourbar_input_text(joint_state):
+    txt = 'Posses:\n' + 'Joints:\n'
+    txt += '1 0 R Ground\n'
+    txt += '%f %f R\n'%(joint_state[2], joint_state[3])
+    txt += '%f %f R\n'%(joint_state[0], joint_state[1])
+    txt += '0 0 R Ground\n'
+    txt += '%f %f R\n'%(joint_state[2], joint_state[3])
+    txt += '%f %f R\n'%(joint_state[4], joint_state[5])
+    txt += '%f %f R\n'%(joint_state[0], joint_state[1])
+    txt += 'Links:\n'
+    txt += '1 -> 2 rgba(173, 255, 47, 0.6)\n'
+    txt += '2 -> 3 rgba(173, 255, 47, 0.6)\n'
+    txt += '4 -> 3 rgba(173, 255, 47, 0.6)\n'
+    txt += '5 -> 6 rgba(173, 255, 47, 0.6)\n'
+    txt += '6 -> 7 rgba(173, 255, 47, 0.6)\n'
+    return txt
+
+
+class FourBarExplore(gym.Env):
     metadata = {
         'render.modes': ['human', 'rgb_array'],
         'video.frames_per_second' : 50
     }
-
     def __init__(self):
         self.mode = 'path'
-        high = np.concatenate((np.array([ 5.0, 5.0, 5.0, 5.0, 5.0]), np.ones((100,))*np.inf))
-        low = np.concatenate((np.array([ 0.2, 0.2, 0.2, -5.0, -5.0]), -np.ones((100,))*np.inf))
+        """
+            Distance for Each Joint pair => 9 lengths * 100 steps
+            Coupler Curve 100 Points
+            Action space => 3^3 - 1 (all ratios are same should not be taken) = 26
+        """
+        high = np.array([np.inf]*9*50)
+        low = np.array([-np.inf]*9*50)
 
-        self.action_space = spaces.Discrete(10)
+        high_act = np.array([0.5]*6)
+        low_act = np.array([-0.5]*6)
+
+        self.action_space = spaces.Box(low_act, high_act)
         self.observation_space = spaces.Box(low, high)
 
-        self.seed()
         self.viewer = None
         self.state = None
 
         self.fig = plt.figure()
         self.ax1 = self.fig.add_subplot(111)
-        self.line1 = self.ax1.plot(np.arange(1), np.arange(1), 'o', label='Task')[0]
-        self.line2 = self.ax1.plot(np.arange(1), np.arange(1), '-', label='Achieved_1')[0]
-        self.line3 = self.ax1.plot(np.arange(1), np.arange(1), '-', label='Achieved_2')[0]
-        self.line4 = self.ax1.plot(np.arange(1), np.arange(1), '-', label='Achieved_3')[0]
-        self.line5 = self.ax1.plot(np.arange(1), np.arange(1), '-', label='Achieved_4')[0]
-        #self.l1 = self.ax1.plot(np.arange(1), np.arange(1), '-')[0]
-        #self.l2 = self.ax1.plot(np.arange(1), np.arange(1), '-')[0]
-        #self.l3 = self.ax1.plot(np.arange(1), np.arange(1), '-')[0]
-        #self.l4 = self.ax1.plot(np.arange(1), np.arange(1), '-')[0]
-        #self.l5 = self.ax1.plot(np.arange(1), np.arange(1), '-')[0]
+        self.line1 = self.ax1.plot(np.arange(1), np.arange(1), '-', label='Coupler curve')[0]
+        self.line2 = self.ax1.plot(np.arange(1), np.arange(1), 'o', label='Coupler curve')[0]
+        self.line3 = self.ax1.plot(np.arange(1), np.arange(1), 'o', label='Coupler curve')[0]
+        self.l1 = self.ax1.plot(np.arange(1), np.arange(1), 'k-')[0]
+        self.l2 = self.ax1.plot(np.arange(1), np.arange(1), 'k-')[0]
+        self.l3 = self.ax1.plot(np.arange(1), np.arange(1), 'k-')[0]
+        self.l4 = self.ax1.plot(np.arange(1), np.arange(1), 'k-')[0]
+        self.l5 = self.ax1.plot(np.arange(1), np.arange(1), 'k-')[0]
         self.ax1.axis('equal')
-
-        self.dl = 0.05 # 5 percent change at each action
-
         self.steps_beyond_done = None
+
+        self.input_state = tf.placeholder(dtype=tf.float32, shape=[None, self.observation_space.shape[0]], name='input_state')
+        self.batch_size = np.inf
+        self.reward_model = CuriosityAE(hidden_units=225)
+
+        if os.path.isfile("./env-data/dataset.pkl"):
+            print('Loading Dataset from model...')
+            with open("./env-data/dataset.pkl", 'rb') as f:
+                self.dataset = pickle.load(f)
+                f.close()
+        else:
+            self.dataset = Dataset(1000000)
+
+        self.current_curious_loss = tf.reduce_mean(tf.square(self.reward_model.predict(self.input_state) - self.input_state))
+        self.reward_model_grads = tf.gradients(self.current_curious_loss, self.reward_model.trainable_vars)
+        reward_model_grads_and_vars = zip(self.reward_model_grads, self.reward_model.trainable_vars)
+        self.reward_model_train_op = tf.train.AdamOptimizer(learning_rate=0.01).apply_gradients(reward_model_grads_and_vars)
+        self.saver = tf.train.Saver(max_to_keep=3)
 
     def reset(self):
         '''
@@ -55,136 +117,184 @@ class FourBarPathEnv1(gym.Env):
         Reseting the task
         Taking part (first 70 points) of a random trajectory as target
         This is because 70 points make non trivial path/motion
+        self._state = {'fe': [0, 0.5], 'se': [1,1], 'cp':[0.5,1]}
         '''
         self.steps = 0
-        self.goal_params = sample_logNormal_link_params()
-        coupler_curves = simulate_fourbar(self.goal_params)
-        if len(coupler_curves.signs) == 0:
-            print('Params : {} are invalid'.format(self.goal_params))
-            print('Coupler points in each curve are : {}, {}, {}, {}'.format(len(coupler_curves.curv1), len(coupler_curves.curv2), len(coupler_curves.curv3), len(coupler_curves.curv4)))
-            raise ValueError
-        task = coupler_curves.signs[0]
-        self.task = task[self.mode + '_sign']
-        self.goal = task['fixed_' + self.mode + '_sign'].flatten()
-        self.goal_trajectory = coupler_curves.curv1
-
-        '''
-        Reinitializing coupler curves
-        Evaluating coupler curves
-        '''
-        self.params = sample_logNormal_link_params()
-        self.coupler_curves = simulate_fourbar(self.params)
+        self._state = [0, 0.5, 1, 1, 0.5, 1]
+        joint_data = get_simulated_data(self._state, linkage_type='fourbar')
+        self.state = self._calc_state(joint_data)
 
         self.steps_beyond_done = None
-
-        self.state = np.concatenate((self.params, self.goal), axis=0)
-
         return np.array(self.state)
 
-    def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
-        return [seed]
+    def _do_action(self, action):
+        self._state = self._state + action*5e-1
+
+    def _calc_state(self, joint_data):
+        """ input : List[List[List]]
+            output = numpyArray [900]
+        """
+        try:
+            fg = np.reshape(joint_data[0,0,:].copy(), (2,1))
+            sg = np.reshape(joint_data[2,0,:].copy(), (2,1))
+        except:
+            print(joint_data.shape)
+
+        fe = np.zeros((2,50))
+        se = np.zeros((2,50))
+        cp = np.zeros((2,50))
+        theta = np.zeros((50))
+
+        ind = 0.0
+        step = (joint_data.shape[1] - 1)/ 49.0
+        i = 0
+        while round(ind) < joint_data.shape[1]:
+            fe[:,i] = joint_data[1,round(ind),:]
+            se[:,i] = joint_data[3,round(ind),:]
+            cp[:,i] = joint_data[5,round(ind),:]
+            theta[i] = np.arctan2(joint_data[5,round(ind),1] - joint_data[1,round(ind),1], joint_data[5,round(ind),0] - joint_data[1,round(ind),0])
+            ind += step
+            i += 1
+            if i == 50:
+                break
+        state = np.zeros((50, 9))
+        self.coupler_curves = cp
+        self.theta = theta
+
+        if i == 50:
+            state[:, 0] = np.sum((fe - se)**2, axis=0)**0.5
+            state[:, 1] = np.sum((se - cp)**2, axis=0)**0.5
+            state[:, 2] = np.sum((fe - cp)**2, axis=0)**0.5
+            state[:, 3] = np.sum((cp - fg)**2, axis=0)**0.5
+            state[:, 4] = np.sum((cp - sg)**2, axis=0)**0.5
+            state[:, 5] = np.sum((se - fg)**2, axis=0)**0.5
+            state[:, 6] = np.sum((fe - sg)**2, axis=0)**0.5
+            state[:, 7] = np.sum((fe - fg)**2, axis=0)**0.5
+            state[:, 8] = np.sum((se - sg)**2, axis=0)**0.5
+        else:
+            logger.warn('Coupler curve points are is less than 50')
+
+        state = np.reshape(state, [1, 50*9])
+        if np.std(state) > 1e-3:
+            state = (state - np.mean(state))/np.std(state)
+        else:
+            state = (state - np.mean(state))
+        return state
+
+    def _calc_params(self):
+        p1 = np.sum((self._state[0:2])**2)**0.5
+        p2 = np.sum((self._state[2:4] - np.array([1, 0]))**2)**0.5
+        p3 = np.sum((self._state[2:4] - self._state[0:2])**2)**0.5
+        cp_ff = self._state[4:6] - (self._state[0:2] + self._state[2:4])/2
+        phi = np.arctan2(self._state[3] - self._state[1], self._state[2] - self._state[0])
+        p4 = cp_ff[0]*np.cos(phi) + cp_ff[1]*np.sin(phi)
+        p5 = -cp_ff[0]*np.sin(phi) + cp_ff[1]*np.cos(phi)
+        self.params = np.array([p1, p2, p3, p4, p5])
+        self.crank_angle = np.arctan2(self._state[1], self._state[0])
+
+    def _calc_reward(self, sess):
+        curious_loss = sess.run(self.current_curious_loss, feed_dict={self.input_state: self.state})
+        return -1.0 /(curious_loss)
 
     def step(self, action):
         assert self.action_space.contains(action), "%r (%s) invalid"%(action, type(action))
-        self.steps += 1
 
-        self._calculate_params(action)
+        with tf.Session() as sess:
+            try:
+                print('Restoring from checkpoint...')
+                self.saver.restore(sess, "./env-data/model.ckpt")
+                sess.graph.finalize()
+            except:
+                print('No checkpoints found')
+                sess.run(tf.global_variables_initializer())
+                sess.graph.finalize()
 
-        reward, done = self._evaluate_step()
+            self.steps += 1
 
-        is_sucess = done
-        if self.steps > 1000:
-            done = True
-        '''
-        TODO: goal state should be of fixed dimensions, which currently is not.
-        for goal based RL algorithms use commented
-        '''
-        if not done:
-            pass
-        elif self.steps_beyond_done is None:
-            self.steps_beyond_done = 0
-        else:
-            if self.steps_beyond_done == 0:
-                logger.warn("You are calling 'step()' even though this environment has already returned done = True. You should always call 'reset()' once you receive 'done = True' -- any further steps are undefined behavior.")
-            self.steps_beyond_done += 1
+            self._do_action(action)
 
-        self.state = np.concatenate((self.params, self.goal), axis=0)
+            joint_data = get_simulated_data(self._state, linkage_type='fourbar')
+            self.state = self._calc_state(joint_data)
 
-        return (self.state, reward, done, {'is_sucess': is_sucess})
+            reward = self._calc_reward(sess)
+            done = False
+            if self.steps > 50:
+                done = True
+            if not done:
+                pass
+            elif self.steps_beyond_done is None:
+                self.steps_beyond_done = 0
+            else:
+                if self.steps_beyond_done == 0:
+                    logger.warn("You are calling 'step()' even though this environment has already returned done = True. You should always call 'reset()' once you receive 'done = True' -- any further steps are undefined behavior.")
+                self.steps_beyond_done += 1
+
+            self._calc_params()
+            info = {'params':self.params, 'theta': self.theta, 'cp': self.coupler_curves, 'joint_data': joint_data}
+
+            if reward >= -5:
+                self.dataset.add(self.state, self.params, joint_data, self.theta)
+                print('Added to the dataset')
+                print('reward :', reward)
+                with open("./env-data/dataset.pkl", 'wb') as f:
+                    pickle.dump(self.dataset, f)
+                    f.close()
+
+            train_batch = self.dataset.getBatch(self.batch_size)
+            curious_loss = sess.run(self.current_curious_loss, feed_dict={ self.input_state: train_batch['state'] })
+            while curious_loss >= 0.05:
+                curious_loss, _ = sess.run((self.current_curious_loss, self.reward_model_train_op), feed_dict={
+                    self.input_state: train_batch['state'] })
+                print(curious_loss)
+
+            self.saver.save(sess, "./env-data/model.ckpt")
+
+        return (self.state, reward, done, info)
 
     def render(self, mode='human'):
         ''' Should render fourbar and its coupler curve
         '''
+
+        self.line1.set_data(self.coupler_curves[0, :], self.coupler_curves[1, :])
+        self.line2.set_data(self.coupler_curves[0, 0], self.coupler_curves[1, 0])
+        self.line3.set_data(self.coupler_curves[0, -1], self.coupler_curves[1, -1])
+        self.l1.set_data([0,self._state[0]], [0, self._state[1]])
+        self.l2.set_data([1,self._state[2]], [0, self._state[3]])
+        self.l3.set_data([self._state[0], self._state[2]], [self._state[1], self._state[3]])
+        self.l4.set_data([self._state[0], self._state[4]], [self._state[1], self._state[5]])
+        self.l5.set_data([self._state[2], self._state[4]], [self._state[3], self._state[5]])
+
+
         self.ax1.autoscale_view()
         self.ax1.relim()
-        self.line1.set_data(self.goal_trajectory[:,0], self.goal_trajectory[:,1])
-        if len(self.coupler_curves.curv1) > 5:
-            self.line2.set_data(self.coupler_curves.curv1[:,0], self.coupler_curves.curv1[:,1])
-        if len(self.coupler_curves.curv2) > 5:
-            self.line3.set_data(self.coupler_curves.curv2[:,0], self.coupler_curves.curv2[:,1])
-        if len(self.coupler_curves.curv3) > 5:
-            self.line4.set_data(self.coupler_curves.curv3[:,0], self.coupler_curves.curv3[:,1])
-        if len(self.coupler_curves.curv4) > 5:
-            self.line5.set_data(self.coupler_curves.curv4[:,0], self.coupler_curves.curv4[:,1])
-
-        #self.l1.set_data([0,self.state[0]], [0, self.state[1]])
-        #self.l2.set_data([1,self.state[2]], [0, self.state[3]])
-        #self.l3.set_data([self.state[0], self.state[2]], [self.state[1], self.state[3]])
-        #self.l4.set_data([self.state[0], self.state[4]], [self.state[1], self.state[5]])
-        #self.l5.set_data([self.state[2], self.state[4]], [self.state[3], self.state[5]])
-
-
         self.ax1.legend(loc='best')
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
-        plt.pause(0.1)
+        plt.pause(1)
 
     def close(self):
         if self.viewer: self.viewer.close()
 
-    def _calculate_params(self, action):
-        ''' Action is changing the link ratios
-            if actions leads into invalid link combination then it is discarded i.e. returned to previous state.
-        '''
-        l_diff = [self.dl, self.dl, self.dl, self.dl, self.dl]
-        action_vector = np.zeros((5,))
-        if action > 4:
-            action = action - 5
-            action_vector[action] = -1
-        else:
-            action_vector[action] = 1
-        params = self.params + l_diff * action_vector
+class FourBarExploreDiscrete(FourBarExplore):
+    def __init__(self):
+        super(FourBarExploreDiscrete, self).__init__()
+        self.action_space = spaces.Discrete(12)
 
-        if is_feasible_fourbar(params):
-            self.params = params
-
-    def _evaluate_step(self):
-        ''' Calculates reward for current parameters and task
-        '''
-        coupler_curves = simulate_fourbar(self.params)
-        if len(coupler_curves.signs) == 0:
-            print('Params : {} are invalid'.format(self.params))
-            print('Coupler points in each curve are : {}, {}, {}, {}'.format(len(coupler_curves.curv1), len(coupler_curves.curv2), len(coupler_curves.curv3), len(coupler_curves.curv4)))
-            raise ValueError
-
-        reward = -1
-        if self.mode == 'path':
-            for sign in coupler_curves.signs:
-                result = normalized_cross_corelation(coupler_curves.signs[1][self.mode + '_sign'], self.task)
-                if reward < result['score'] - 1:
-                    reward = result['score'] - 1
-
-
-        if reward > -0.02:
-            success = True
-        else:
-            success = False
-
-        if success:
-            with open('synth_stats.txt', 'a') as f:
-                f.write('Synthesis complete for params : {} is {} with error {}.\n'.format(self.goal_params, self.params, -reward))
-
-        self.coupler_curves = coupler_curves
-
-        return reward, success
+    def _do_action(self, action):
+        action_panel = np.array([
+                [1, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 1],
+                [-1, 0, 0, 0, 0, 0],
+                [0, -1, 0, 0, 0, 0],
+                [0, 0, -1, 0, 0, 0],
+                [0, 0, 0, -1, 0, 0],
+                [0, 0, 0, 0, -1, 0],
+                [0, 0, 0, 0, 0, -1],
+                ])
+        print(self._state, action)
+        self._state = self._state + action_panel[action]*5e-2
+        print(self._state)

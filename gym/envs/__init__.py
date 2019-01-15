@@ -535,15 +535,15 @@ register(
 # -----------------------------------
 
 register(
-    id='FourBarPath-v0',
-    entry_point='gym.envs.synthesis:FourBarPathEnv1',
+    id='FourBarExplore-v0',
+    entry_point='gym.envs.synthesis:FourBarExplore',
     max_episode_steps=200,
     reward_threshold=195.0,
 )
 
 register(
-    id='CouplerMotion-v0',
-    entry_point='gym.envs.synthesis:CouplerMotionSynthesis',
+    id='FourBarExploreDiscrete-v0',
+    entry_point='gym.envs.synthesis:FourBarExploreDiscrete',
     max_episode_steps=200,
-    reward_threshold= -0.05,
+    reward_threshold=195.0,
 )
