@@ -68,11 +68,12 @@ class FourBarExplore(gym.Env):
             Coupler Curve 100 Points
             Action space => 3^3 - 1 (all ratios are same should not be taken) = 26
         """
-        high = np.array([np.inf]*9*50)
-        low = np.array([-np.inf]*9*50)
+        high = np.array([10]*9*50)
+        low = np.array([-10]*9*50)
 
-        high_act = np.array([0.5]*6)
-        low_act = np.array([-0.5]*6)
+        high_act = np.array([10]*6)
+        low_act = np.array([-10]*6)
+        self.max_steps = 30
 
         self.action_space = spaces.Box(low_act, high_act)
         self.observation_space = spaces.Box(low, high)
@@ -96,9 +97,10 @@ class FourBarExplore(gym.Env):
         self.input_state = tf.placeholder(dtype=tf.float32, shape=[None, self.observation_space.shape[0]], name='input_state')
         self.batch_size = np.inf
         self.reward_model = CuriosityAE(hidden_units=225)
+        if not os.path.exists("./env-data"):
+            os.mkdir("./env-data")
 
         if os.path.isfile("./env-data/dataset.pkl"):
-            print('Loading Dataset from model...')
             with open("./env-data/dataset.pkl", 'rb') as f:
                 self.dataset = pickle.load(f)
                 f.close()
@@ -120,7 +122,8 @@ class FourBarExplore(gym.Env):
         self._state = {'fe': [0, 0.5], 'se': [1,1], 'cp':[0.5,1]}
         '''
         self.steps = 0
-        self._state = [0, 0.5, 1, 1, 0.5, 1]
+        #self._state = [0, 0.5, 1, 1, 0.5, 1]
+        self._state = [np.random.uniform(-2, 2), np.random.uniform(-2, 2), np.random.uniform(-2, 2), np.random.uniform(-2, 2), np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
         joint_data = get_simulated_data(self._state, linkage_type='fourbar')
         self.state = self._calc_state(joint_data)
 
@@ -128,7 +131,7 @@ class FourBarExplore(gym.Env):
         return np.array(self.state)
 
     def _do_action(self, action):
-        self._state = self._state + action*5e-1
+        self._state = self._state + action*2e-1
 
     def _calc_state(self, joint_data):
         """ input : List[List[List]]
@@ -179,6 +182,10 @@ class FourBarExplore(gym.Env):
             state = (state - np.mean(state))/np.std(state)
         else:
             state = (state - np.mean(state))
+
+        self.fe = fe
+        self.se = se
+
         return state
 
     def _calc_params(self):
@@ -201,11 +208,9 @@ class FourBarExplore(gym.Env):
 
         with tf.Session() as sess:
             try:
-                print('Restoring from checkpoint...')
                 self.saver.restore(sess, "./env-data/model.ckpt")
                 sess.graph.finalize()
             except:
-                print('No checkpoints found')
                 sess.run(tf.global_variables_initializer())
                 sess.graph.finalize()
 
@@ -218,7 +223,7 @@ class FourBarExplore(gym.Env):
 
             reward = self._calc_reward(sess)
             done = False
-            if self.steps > 50:
+            if self.steps > self.max_steps:
                 done = True
             if not done:
                 pass
@@ -230,12 +235,11 @@ class FourBarExplore(gym.Env):
                 self.steps_beyond_done += 1
 
             self._calc_params()
-            info = {'params':self.params, 'theta': self.theta, 'cp': self.coupler_curves, 'joint_data': joint_data}
+            info = {'params':self.params, 'theta': self.theta, 'cp': self.coupler_curves, 'fe': self.fe, 'se': self.se}
 
             if reward >= -5:
-                self.dataset.add(self.state, self.params, joint_data, self.theta)
+                self.dataset.add(self.state, self.params, self.fe, self.se, self.coupler_curves, self.theta)
                 print('Added to the dataset')
-                print('reward :', reward)
                 with open("./env-data/dataset.pkl", 'wb') as f:
                     pickle.dump(self.dataset, f)
                     f.close()
@@ -245,7 +249,6 @@ class FourBarExplore(gym.Env):
             while curious_loss >= 0.05:
                 curious_loss, _ = sess.run((self.current_curious_loss, self.reward_model_train_op), feed_dict={
                     self.input_state: train_batch['state'] })
-                print(curious_loss)
 
             self.saver.save(sess, "./env-data/model.ckpt")
 
@@ -279,6 +282,7 @@ class FourBarExploreDiscrete(FourBarExplore):
     def __init__(self):
         super(FourBarExploreDiscrete, self).__init__()
         self.action_space = spaces.Discrete(12)
+        self.max_steps = 100
 
     def _do_action(self, action):
         action_panel = np.array([
@@ -295,6 +299,4 @@ class FourBarExploreDiscrete(FourBarExplore):
                 [0, 0, 0, 0, -1, 0],
                 [0, 0, 0, 0, 0, -1],
                 ])
-        print(self._state, action)
         self._state = self._state + action_panel[action]*5e-2
-        print(self._state)
