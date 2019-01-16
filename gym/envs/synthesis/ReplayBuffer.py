@@ -66,10 +66,12 @@ class ReplayBuffer:
         self.num_experiences = 0
 
 class Dataset(ReplayBuffer):
-    def add(self, state, params, joint_data, theta):
+    def add(self, state, params, fe, se, cp, theta):
         experience = {'state':state,
                 'params': params,
-                'joint_data': joint_data,
+                'fe': fe,
+                'se': se,
+                'cp': cp,
                 'theta': theta
                 }
         if self.num_experiences < self.buffer_size:
@@ -79,9 +81,3 @@ class Dataset(ReplayBuffer):
             self.buffer.popleft()
             self.buffer.append(experience)
 
-    def count(self):
-        return self.num_experiences
-
-    def erase(self):
-        self.buffer = deque()
-        self.num_experiences = 0
