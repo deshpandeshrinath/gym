@@ -120,10 +120,25 @@ class CuriosityAE(Model):
             if reuse:
                 scope.reuse_variables()
             hidden = state
-            for i in range(self.num_layers):
-                hidden = tf.layers.dense(hidden, self.hidden_units)
+            for hu in [128, 32, 128]:
+                hidden = tf.layers.dense(hidden, hu)
                 if self.layer_norm:
                     hidden = tc.layers.layer_norm(hidden, center=True, scale=True)
                 hidden = tf.nn.relu(hidden)
             next_state = tf.layers.dense(hidden, state.shape[1])
         return next_state
+
+    #def predict(self, state, reuse=False):
+    #    """ returns actions for given state
+    #    """
+    #    with tf.variable_scope(self.name) as scope:
+    #        if reuse:
+    #            scope.reuse_variables()
+    #        hidden = state
+    #        for i in range(self.num_layers):
+    #            hidden = tf.layers.dense(hidden, self.hidden_units)
+    #            if self.layer_norm:
+    #                hidden = tc.layers.layer_norm(hidden, center=True, scale=True)
+    #            hidden = tf.nn.relu(hidden)
+    #        next_state = tf.layers.dense(hidden, state.shape[1])
+    #    return next_state
