@@ -11,6 +11,7 @@ import tensorflow as tf
 import pickle
 from gym.envs.synthesis.models import CuriosityAE
 from gym.envs.synthesis.ReplayBuffer import Dataset
+from gym.envs.synthesis.utils import normalize_path
 import xml.etree.ElementTree as ET
 from matplotlib.patches import Circle, Wedge, Polygon
 
@@ -19,7 +20,7 @@ class MechanismExplore(gym.Env):
         'render.modes': ['human', 'rgb_array'],
         'video.frames_per_second' : 50
     }
-    def __init__(self, linkage_type, obs_dim, act_dim, z_dim=32):
+    def __init__(self, linkage_type, obs_dim, act_dim, z_dim=64):
         self.mode = 'path'
         self.linkage_type = linkage_type
         self.viewer = None
@@ -29,22 +30,23 @@ class MechanismExplore(gym.Env):
         low_obs = np.array([-10]*obs_dim*100)
         high_act = np.array([10]*act_dim)
         low_act = np.array([-10]*act_dim)
-        self.max_steps = 30
+        self.max_steps = 10
         self.action_space = spaces.Box(low_act, high_act)
         self.observation_space = spaces.Box(low_obs, high_obs)
         self._render_bool = False
         ''' Internal Model for Measuring Curiosity
         '''
-        self.input_state = tf.placeholder(dtype=tf.float32, shape=[None, self.observation_space.shape[0]], name='input_state')
-        self.batch_size = np.inf
-        self.reward_model = CuriosityAE(name= 'curiousity' + self.linkage_type , hidden_units=z_dim)
-        self._load_dataset()
+        with tf.variable_scope('curiousity' + self.linkage_type) as scope:
+            self.input_state = tf.placeholder(dtype=tf.float32, shape=[None, self.observation_space.shape[0]], name='input_state')
+            self.batch_size = np.inf
+            self.reward_model = CuriosityAE(name= 'curiousity' + self.linkage_type , hidden_units=z_dim)
+            self._load_dataset()
 
-        self.current_curious_loss = tf.reduce_mean(tf.square(self.reward_model.predict(self.input_state) - self.input_state))
-        self.reward_model_grads = tf.gradients(self.current_curious_loss, self.reward_model.trainable_vars)
-        reward_model_grads_and_vars = zip(self.reward_model_grads, self.reward_model.trainable_vars)
-        self.reward_model_train_op = tf.train.AdamOptimizer(learning_rate=0.01).apply_gradients(reward_model_grads_and_vars)
-        self.saver = tf.train.Saver(max_to_keep=3)
+            self.current_curious_loss = tf.reduce_mean(tf.square(self.reward_model.predict(self.input_state) - self.input_state))
+            self.reward_model_grads = tf.gradients(self.current_curious_loss, self.reward_model.trainable_vars)
+            reward_model_grads_and_vars = zip(self.reward_model_grads, self.reward_model.trainable_vars)
+            self.reward_model_train_op = tf.train.AdamOptimizer(learning_rate=0.01).apply_gradients(reward_model_grads_and_vars)
+            self.saver = tf.train.Saver(max_to_keep=3)
 
     def render_init(self):
         self.fig = plt.figure()
@@ -57,10 +59,10 @@ class MechanismExplore(gym.Env):
         with tf.Session() as sess:
             try:
                 self.saver.restore(sess, "./env-data-%s/model.ckpt"%self.linkage_type)
-                sess.graph.finalize()
+                #sess.graph.finalize()
             except:
                 sess.run(tf.global_variables_initializer())
-                sess.graph.finalize()
+                #sess.graph.finalize()
 
             self.steps += 1
 
@@ -97,13 +99,13 @@ class MechanismExplore(gym.Env):
                     self.input_state: train_batch['state'] })
 
             self.saver.save(sess, "./env-data-%s/model.ckpt"%self.linkage_type)
+            print(reward)
 
         return (self.state, reward, done, info)
 
     def _calc_reward(self, sess):
         curious_loss = sess.run(self.current_curious_loss, feed_dict={self.input_state: self.state})
         return -1.0 /(curious_loss)
-
 
     def reset(self):
         '''
@@ -366,12 +368,12 @@ class SixBarExplore_Steph3a(MechanismExplore):
         return root
 
     def _get_random_state(self):
-        fe = [np.random.uniform(-1, 1), np.random.uniform(-1, 1)]
-        se = [np.random.uniform(0, 2), np.random.uniform(-1, 1)]
-        fbcp = [np.random.uniform(-1, 1), np.random.uniform(-1, 1)]
-        tg = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
-        te = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
-        cp = [np.random.uniform(-1, 1), np.random.uniform(-1, 1)]
+        fe = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
+        se = [np.random.uniform(-1, 3), np.random.uniform(-2, 2)]
+        fbcp = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
+        tg = [np.random.uniform(-3, 3), np.random.uniform(-3, 3)]
+        te = [np.random.uniform(-3, 3), np.random.uniform(-3, 3)]
+        cp = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
         return np.array(fe+se+fbcp+cp+te+tg)
 
     def _do_action(self, action):
@@ -586,12 +588,12 @@ class SixBarExplore_Watt1(MechanismExplore):
         return root
 
     def _get_random_state(self):
-        p1 = [np.random.uniform(-1, 1), np.random.uniform(-1, 1)]
-        p2 = [np.random.uniform(0, 2), np.random.uniform(0, 2)]
-        p3 = [np.random.uniform(0, 2), np.random.uniform(0, 2)]
-        p4 = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
-        p5 = [np.random.uniform(-1, 3), np.random.uniform(-1, 3)]
-        p6 = [np.random.uniform(-1, 1), np.random.uniform(-1, 1)]
+        p1 = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
+        p2 = [np.random.uniform(-1, 3), np.random.uniform(-1, 3)]
+        p3 = [np.random.uniform(-1, 3), np.random.uniform(-1, 3)]
+        p4 = [np.random.uniform(-3, 3), np.random.uniform(-3, 3)]
+        p5 = [np.random.uniform(-2, 4), np.random.uniform(-2, 4)]
+        p6 = [np.random.uniform(-2, 2), np.random.uniform(-2, 2)]
         return np.array(p1 + p2 + p3 + p4 + p5 + p6)
 
     def _do_action(self, action):
